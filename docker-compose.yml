@@ -1,0 +1,216 @@
+# Toàn bộ hệ thống chạy bằng: docker compose up -d --build
+# Hạ tầng lên trước (postgres/redis/kafka), service chờ healthcheck rồi mới khởi động.
+
+name: ecommerce-microservices
+
+x-dotnet-common: &dotnet-common
+  restart: unless-stopped
+  environment: &dotnet-env
+    ASPNETCORE_ENVIRONMENT: Development
+    ASPNETCORE_URLS: http://+:8080
+    Kafka__BootstrapServers: kafka:29092
+    Redis__ConnectionString: redis:6379
+    Jwt__Issuer: ecommerce-identity
+    Jwt__Audience: ecommerce-api
+    Jwt__SecretKey: ${JWT_SECRET:-dev-only-super-secret-key-please-change-in-production-32b+}
+    Cors__AllowedOrigins__0: http://localhost:5173
+    Cors__AllowedOrigins__1: http://localhost:3000
+    Serilog__MinimumLevel__Default: Information
+  networks: [ecommerce]
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis: { condition: service_healthy }
+    kafka: { condition: service_healthy }
+
+services:
+  # ---------------------------------------------------------------- hạ tầng --
+  postgres:
+    image: postgres:16-alpine
+    container_name: ecom-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: postgres
+    ports: ["5432:5432"]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./deploy/postgres/init-databases.sh:/docker-entrypoint-initdb.d/01-init-databases.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [ecommerce]
+
+  redis:
+    image: redis:7-alpine
+    container_name: ecom-redis
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    ports: ["6379:6379"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [ecommerce]
+
+  # Kafka chạy chế độ KRaft — không cần Zookeeper.
+  kafka:
+    image: confluentinc/cp-kafka:7.7.1
+    container_name: ecom-kafka
+    ports:
+      - "9092:9092"    # client ngoài container (chạy service bằng dotnet run)
+      - "9101:9101"    # JMX
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_JMX_PORT: 9101
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:29092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+    networks: [ecommerce]
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: ecom-kafka-ui
+    ports: ["8090:8080"]
+    environment:
+      KAFKA_CLUSTERS_0_NAME: ecommerce
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      DYNAMIC_CONFIG_ENABLED: "true"
+    depends_on:
+      kafka: { condition: service_healthy }
+    networks: [ecommerce]
+
+  # ---------------------------------------------------------------- service --
+  identity-service:
+    <<: *dotnet-common
+    build: { context: ., dockerfile: services/identity/Dockerfile }
+    container_name: ecom-identity
+    ports: ["5100:8080"]
+    environment:
+      <<: *dotnet-env
+      ConnectionStrings__Default: Host=postgres;Port=5432;Database=identity_db;Username=postgres;Password=${POSTGRES_PASSWORD:-postgres}
+      SeedData: "true"
+
+  product-service:
+    <<: *dotnet-common
+    build: { context: ., dockerfile: services/product/Dockerfile }
+    container_name: ecom-product
+    ports: ["5101:8080"]
+    environment:
+      <<: *dotnet-env
+      ConnectionStrings__Default: Host=postgres;Port=5432;Database=product_db;Username=postgres;Password=${POSTGRES_PASSWORD:-postgres}
+      SeedData: "true"
+
+  inventory-service:
+    <<: *dotnet-common
+    build: { context: ., dockerfile: services/inventory/Dockerfile }
+    container_name: ecom-inventory
+    ports: ["5102:8080"]
+    environment:
+      <<: *dotnet-env
+      ConnectionStrings__Default: Host=postgres;Port=5432;Database=inventory_db;Username=postgres;Password=${POSTGRES_PASSWORD:-postgres}
+
+  order-service:
+    <<: *dotnet-common
+    build: { context: ., dockerfile: services/order/Dockerfile }
+    container_name: ecom-order
+    ports: ["5103:8080"]
+    environment:
+      <<: *dotnet-env
+      ConnectionStrings__Default: Host=postgres;Port=5432;Database=order_db;Username=postgres;Password=${POSTGRES_PASSWORD:-postgres}
+      # gRPC nội bộ: dùng tên service của compose, không đi qua gateway.
+      GrpcClients__Product: http://product-service:8080
+      GrpcClients__Inventory: http://inventory-service:8080
+
+  payment-service:
+    <<: *dotnet-common
+    build: { context: ., dockerfile: services/payment/Dockerfile }
+    container_name: ecom-payment
+    ports: ["5104:8080"]
+    environment:
+      <<: *dotnet-env
+      ConnectionStrings__Default: Host=postgres;Port=5432;Database=payment_db;Username=postgres;Password=${POSTGRES_PASSWORD:-postgres}
+      PaymentGateway__FailureRate: "0.1"
+      PaymentGateway__ForceFailAmountMultiple: "13"
+
+  notification-service:
+    <<: *dotnet-common
+    build: { context: ., dockerfile: services/notification/Dockerfile }
+    container_name: ecom-notification
+    ports: ["5105:8080"]
+    environment:
+      <<: *dotnet-env
+      ConnectionStrings__Default: Host=postgres;Port=5432;Database=notification_db;Username=postgres;Password=${POSTGRES_PASSWORD:-postgres}
+
+  api-gateway:
+    build: { context: ., dockerfile: gateway/Dockerfile }
+    container_name: ecom-gateway
+    restart: unless-stopped
+    ports: ["5000:8080"]
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      Jwt__Issuer: ecommerce-identity
+      Jwt__Audience: ecommerce-api
+      Jwt__SecretKey: ${JWT_SECRET:-dev-only-super-secret-key-please-change-in-production-32b+}
+      Cors__AllowedOrigins__0: http://localhost:5173
+      Cors__AllowedOrigins__1: http://localhost:3000
+      ReverseProxy__Clusters__identity__Destinations__d1__Address: http://identity-service:8080
+      ReverseProxy__Clusters__product__Destinations__d1__Address: http://product-service:8080
+      ReverseProxy__Clusters__inventory__Destinations__d1__Address: http://inventory-service:8080
+      ReverseProxy__Clusters__order__Destinations__d1__Address: http://order-service:8080
+      ReverseProxy__Clusters__payment__Destinations__d1__Address: http://payment-service:8080
+      ReverseProxy__Clusters__notification__Destinations__d1__Address: http://notification-service:8080
+      HealthTargets__identity: http://identity-service:8080
+      HealthTargets__product: http://product-service:8080
+      HealthTargets__inventory: http://inventory-service:8080
+      HealthTargets__order: http://order-service:8080
+      HealthTargets__payment: http://payment-service:8080
+      HealthTargets__notification: http://notification-service:8080
+    depends_on:
+      - identity-service
+      - product-service
+      - inventory-service
+      - order-service
+      - payment-service
+      - notification-service
+    networks: [ecommerce]
+
+  frontend:
+    build: { context: ./frontend, dockerfile: Dockerfile }
+    container_name: ecom-frontend
+    restart: unless-stopped
+    ports: ["5173:80"]
+    depends_on: [api-gateway]
+    networks: [ecommerce]
+
+networks:
+  ecommerce:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  kafka-data:

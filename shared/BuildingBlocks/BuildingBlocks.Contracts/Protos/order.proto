@@ -1,0 +1,39 @@
+syntax = "proto3";
+package ecommerce.order;
+option csharp_namespace = "BuildingBlocks.Contracts.Grpc.Order";
+
+import "common.proto";
+
+service OrderGrpcService {
+  rpc GetOrder (GetOrderRequest) returns (OrderReply);
+  rpc GetOrdersByCustomer (GetOrdersByCustomerRequest) returns (OrderListReply);
+}
+
+message GetOrderRequest { string id = 1; }
+message GetOrdersByCustomerRequest {
+  string customer_id = 1;
+  ecommerce.common.PageRequest page = 2;
+}
+
+message OrderReply {
+  string id = 1;
+  string order_number = 2;
+  string customer_id = 3;
+  string status = 4;
+  ecommerce.common.Money total = 5;
+  repeated OrderLineReply lines = 6;
+  string created_at = 7;
+}
+
+message OrderLineReply {
+  string product_id = 1;
+  string sku = 2;
+  string name = 3;
+  int32 quantity = 4;
+  ecommerce.common.Money unit_price = 5;
+}
+
+message OrderListReply {
+  repeated OrderReply orders = 1;
+  ecommerce.common.PageInfo page = 2;
+}

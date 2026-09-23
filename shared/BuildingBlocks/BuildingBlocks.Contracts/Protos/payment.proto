@@ -1,0 +1,43 @@
+syntax = "proto3";
+package ecommerce.payment;
+option csharp_namespace = "BuildingBlocks.Contracts.Grpc.Payment";
+
+import "common.proto";
+
+service PaymentGrpcService {
+  // Idempotent theo idempotency_key — gọi lại cùng key trả về cùng kết quả.
+  rpc AuthorizePayment (AuthorizePaymentRequest) returns (PaymentReply);
+  rpc CapturePayment (PaymentActionRequest) returns (PaymentReply);
+  rpc RefundPayment (RefundRequest) returns (PaymentReply);
+  rpc GetPaymentByOrder (GetPaymentByOrderRequest) returns (PaymentReply);
+}
+
+message AuthorizePaymentRequest {
+  string order_id = 1;
+  string customer_id = 2;
+  ecommerce.common.Money amount = 3;
+  string method = 4;            // CreditCard | BankTransfer | Cod | Wallet
+  string idempotency_key = 5;
+}
+
+message PaymentActionRequest { string payment_id = 1; string idempotency_key = 2; }
+
+message RefundRequest {
+  string payment_id = 1;
+  ecommerce.common.Money amount = 2;
+  string reason = 3;
+  string idempotency_key = 4;
+}
+
+message GetPaymentByOrderRequest { string order_id = 1; }
+
+message PaymentReply {
+  string payment_id = 1;
+  string order_id = 2;
+  string status = 3;            // Pending | Authorized | Captured | Failed | Refunded
+  ecommerce.common.Money amount = 4;
+  string method = 5;
+  string transaction_ref = 6;
+  string failure_reason = 7;
+  string created_at = 8;
+}

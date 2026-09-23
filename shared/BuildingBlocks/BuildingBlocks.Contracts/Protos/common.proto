@@ -1,0 +1,25 @@
+syntax = "proto3";
+package ecommerce.common;
+option csharp_namespace = "BuildingBlocks.Contracts.Grpc.Common";
+
+// Tiền tệ truyền dạng chuỗi thập phân ("129000.00") để tránh sai số dấu phẩy động.
+message Money {
+  string amount = 1;
+  string currency = 2;
+}
+
+message PageRequest {
+  int32 page = 1;
+  int32 page_size = 2;
+}
+
+message PageInfo {
+  int32 page = 1;
+  int32 page_size = 2;
+  int64 total_count = 3;
+}
+
+message ErrorDetail {
+  string code = 1;
+  string message = 2;
+}
